@@ -2,7 +2,7 @@
 
 T41 Server is a Windows console app designed to facilitate communication between the T41 and multiple PC applications over a single USB serial connection.
 
-![T41 Server](https://github.com/tmr4/T41Server/blob/images/T41Server.png)
+![T41 Server](https://github.com/tmr4/T41Server/blob/main/images/T41Server.png)
 
 The app currently does the following:
 
