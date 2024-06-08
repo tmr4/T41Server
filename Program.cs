@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.IO.Ports;
 using System.Data;
+using System.Runtime.CompilerServices;
 
 namespace T41Server;
 
@@ -44,8 +45,16 @@ WSJT-X DXLabSuiteCommanderTransceiver Commands:
 */
 
 internal class Program {
-  static Socket listener;
+  static Socket wsjtListener;
   static IPEndPoint ipEndPoint = new(IPAddress.Parse("127.0.0.1"), 52002);
+
+  static Socket dbListener;
+  static IPEndPoint dbIPEndPoint = new(IPAddress.Parse("127.0.0.1"), 48005);
+  static Socket[] dbSocket = new Socket[101];
+  static int dbCount = 0;
+
+  static Semaphore m_maxNumberAcceptedClients;
+  static SocketAsyncEventArgsPool m_readWritePool;
 
   // serial port data
   static bool connectionStarted = false;
@@ -66,14 +75,17 @@ internal class Program {
   static bool t41Replied = false;
 
   static async Task Main(string[] args) {
-    int received;
+    int received, awaiting;
     string response = "";
     string command = "";
 
-    listener = new Socket(ipEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-    listener.Bind(ipEndPoint);
-    listener.Listen(100);
+    wsjtListener = new Socket(ipEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+    wsjtListener.Bind(ipEndPoint);
+    wsjtListener.Listen(100);
 
+    dbListener = new Socket(dbIPEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+    dbListener.Bind(dbIPEndPoint);
+    dbListener.Listen(100);
 
     if(Connect()) {
       Console.WriteLine($"Connected to " + selectedPort);
@@ -82,12 +94,40 @@ internal class Program {
       SetTime();
     }
 
-    Socket wsjtSocket = await listener.AcceptAsync();
+    m_maxNumberAcceptedClients = new Semaphore(5,5);
+    m_readWritePool = new SocketAsyncEventArgsPool(5);
+    SocketAsyncEventArgs readWriteEventArg;
+    for (int i = 0; i < 5; i++) {
+      //Pre-allocate a set of reusable SocketAsyncEventArgs
+      readWriteEventArg = new SocketAsyncEventArgs();
+      //readWriteEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(IO_Completed);
+
+      // add SocketAsyncEventArg to the pool
+      m_readWritePool.Push(readWriteEventArg);
+    }
+
+    SocketAsyncEventArgs acceptEventArg = new SocketAsyncEventArgs();
+    acceptEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(AcceptEventArg_Completed);
+    StartAccept(acceptEventArg);
+
+    //wsjtListener.Blocking = false;
+    //dbListener.Blocking = false;
+    //awaiting = 0;
+    //dbSocket[dbCount++] = await dbListener.AcceptAsync();
+    //Socket wsjtSocket = await wsjtListener.AcceptAsync();
+    Socket wsjtSocket = wsjtListener.Accept();
 
     while(true) {
       byte[] buffer = new byte[1_024];
       double fq;
       int index, colon, len, demod;
+
+      //if(dbSocket[awaiting] != null) {
+      //  awaiting = dbCount;
+      //  //dbSocket[dbCount++] = await dbListener.AcceptAsync();
+      //  dbSocket[dbCount++] = dbListener.Accept();
+      //}
+      //AcceptConnection(dbListener);
 
       if(!wsjtAwaitingResponse) {
         // await message from WSJT-X
@@ -368,6 +408,14 @@ internal class Program {
     }
   }
 
+  static void AcceptConnection(Socket listeningSocket){
+    //listeningSocket.Blocking = false;
+    Socket newConnection = listeningSocket.Accept();
+    if(newConnection != null) {
+      dbSocket[dbCount++] = newConnection;
+    }
+  }
+
   // Serial port DataReceived events are handled in a secondary thread
   // (https://learn.microsoft.com/en-us/dotnet/api/system.io.ports.serialport.datareceived?view=net-8.0)
   // this says to "post change requests back using Invoke, which will do the work on the proper thread"
@@ -380,76 +428,123 @@ internal class Program {
 
     if(len > 0) {
       byte[] byt = new byte[len];
+      int id;
 
       sp.Read(byt, 0, len);
 
-      // *** assuming here that a single command per buffer ***
       if(len < 512) {
-        // execute command
-        switch((char)byt[0]) {
-          case 'F':
-            if((char)byt[1] == 'A' && (char)byt[13] == ';') {
-              long f;
-              if(FetchFreq(byt, out f)) {
-                freq = f;
-                Console.WriteLine($"   Received FA" + f.ToString() + "; " + "from T41");
-                t41Replied = true;
-              }
-            }
-            break;
+        int first=0, end=0; //next=0, last=0;
+        byte[] cmd = new byte[len];
 
-          case 'M':
-            if((char)byt[1] == 'D' && (char)byt[3] == ';') {
-              int val;
-              if(FetchInt(byt, 2, out val)) {
-                switch(val) {
-                  case 0: // USB
-                    mode = "USB";
-                    break;
+        // we might have more than one command
+        byt.CopyTo(cmd, 0);
+        do {
+          byte[] msg = new byte[len];
 
-                  case 1: // LSB
-                    mode = "LSB";
-                    break;
+          //last = Array.LastIndexOf(cmd, (byte)'<');
 
-                  default:
-                    mode = "USB";
-                    break;
+          first = Array.IndexOf(cmd, (byte)'<');
+          if(first == -1) {
+            // assume we'll only get one non-debug msg per buffer
+            first = 0;
+            end = len - 1;
+          } else if(first != 0) {
+            end = first - 1;
+            first = 0;
+          } else {
+            end = Array.IndexOf(cmd, (byte)'>');
+          }
+
+          // execute command
+          switch((char)cmd[0]) {
+            case '<':
+              if((char)cmd[end] == '>') {
+                if(FetchInt(cmd, 1, 2, out id)) {
+                  if(id < 100 && dbSocket[id] != null) {
+                    Array.Fill(msg, (byte)0);
+                    Array.Copy(cmd, msg, end + 1);
+                    dbSocket[id].SendAsync(msg, 0);
+                  } else {
+                    // handle debug messages without a window
+                    Console.WriteLine($"");
+                    Console.Write($"***** ");
+                    Console.Write(Encoding.Default.GetString(cmd, 4, end + 1 - 4));
+                    Console.WriteLine($" *****");
+                    Console.WriteLine($"");
+                  }
                 }
-                Console.WriteLine($"   Received MD" + val.ToString() + "; " + "from T41");
-                t41Replied = true;
               }
-            }
-            break;
+              break;
 
-          case 'S':
-            if((char)byt[1] == 'P' && (char)byt[3] == ';') {
-            // Kenwood TS-2000 manual mentions but doesn't document the split mode command (SP)
-            // The Kenwood TS-890S manual does but is unclear
-            // I'll use a returned value of 1=On and 0=Off
-              int val;
-              if(FetchInt(byt, 2, out val)) {
-                switch(val) {
-                  case 0: // off
-                    split = "OFF";
-                    break;
-
-                  case 1: // on
-                    split = "ON";
-                    break;
-
-                  default:
-                    split = "OFF";
-                    break;
+            case 'F':
+              if((char)cmd[1] == 'A' && (char)cmd[13] == ';') {
+                long f;
+                if(FetchFreq(cmd, out f)) {
+                  freq = f;
+                  Console.WriteLine($"   Received FA" + f.ToString() + "; " + "from T41");
+                  t41Replied = true;
                 }
-                Console.WriteLine($"   Received SP" + val.ToString() + "; " + "from T41");
-                t41Replied = true;
               }
-            }
-            break;
+              break;
 
-          default:
-            break;
-        }
+            case 'M':
+              if((char)cmd[1] == 'D' && (char)cmd[3] == ';') {
+                int val;
+                if(FetchInt(cmd, 2, out val)) {
+                  switch(val) {
+                    case 0: // USB
+                      mode = "USB";
+                      break;
+
+                    case 1: // LSB
+                      mode = "LSB";
+                      break;
+
+                    default:
+                      mode = "USB";
+                      break;
+                  }
+                  Console.WriteLine($"   Received MD" + val.ToString() + "; " + "from T41");
+                  t41Replied = true;
+                }
+              }
+              break;
+
+            case 'S':
+              if((char)cmd[1] == 'P' && (char)cmd[3] == ';') {
+              // Kenwood TS-2000 manual mentions but doesn't document the split mode command (SP)
+              // The Kenwood TS-890S manual does but is unclear
+              // I'll use a returned value of 1=On and 0=Off
+                int val;
+                if(FetchInt(cmd, 2, out val)) {
+                  switch(val) {
+                    case 0: // off
+                      split = "OFF";
+                      break;
+
+                    case 1: // on
+                      split = "ON";
+                      break;
+
+                    default:
+                      split = "OFF";
+                      break;
+                  }
+                  Console.WriteLine($"   Received SP" + val.ToString() + "; " + "from T41");
+                  t41Replied = true;
+                }
+              }
+              break;
+
+            default:
+              break;
+          }
+          if(end + 1 < len) {
+            Array.Copy(cmd, end + 1, cmd, 0, len - end - 1);
+            Array.Fill(cmd, (byte)0, len - end - 1, end);
+          }
+          len = len - end - 1;
+        } while (len > 0);
       }
     }
   }
@@ -478,4 +573,90 @@ internal class Program {
   public static bool FetchInt(string cmd, int start, out int result) {
     return int.TryParse(cmd.Substring(start, 1), out result);
   }
+
+  static void StartAccept(SocketAsyncEventArgs acceptEventArg) {
+    // loop while the method completes synchronously
+    bool willRaiseEvent = false;
+    while (!willRaiseEvent) {
+      m_maxNumberAcceptedClients.WaitOne();
+
+      // socket must be cleared since the context object is being reused
+      acceptEventArg.AcceptSocket = null;
+      willRaiseEvent = dbListener.AcceptAsync(acceptEventArg);
+      if (!willRaiseEvent) {
+        ProcessAccept(acceptEventArg);
+      }
+    }
+  }
+
+  static void AcceptEventArg_Completed(object sender, SocketAsyncEventArgs e) {
+    ProcessAccept(e);
+
+    // Accept the next connection request
+    StartAccept(e);
+  }
+
+  static void ProcessAccept(SocketAsyncEventArgs e)
+  {
+    //Interlocked.Increment(ref dbCount);
+    Console.WriteLine("Client connection accepted. There are {0} clients connected to the server", 5);
+
+    // Get the socket for the accepted client connection and put it into the
+    //ReadEventArg object user token
+    SocketAsyncEventArgs readEventArgs = m_readWritePool.Pop();
+    //readEventArgs.UserToken = e.AcceptSocket;
+    dbSocket[dbCount++] = e.AcceptSocket;
+
+    // As soon as the client is connected, post a receive to the connection
+    //bool willRaiseEvent = e.AcceptSocket.ReceiveAsync(readEventArgs);
+    //if (!willRaiseEvent) {
+    //  ProcessReceive(readEventArgs);
+    //}
+  }
+
+}
+// server stuff above from: https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socketasynceventargs?view=net-8.0
+
+// from: https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socketasynceventargs.-ctor?view=net-8.0
+class SocketAsyncEventArgsPool
+{
+    Stack<SocketAsyncEventArgs> m_pool;
+
+    // Initializes the object pool to the specified size
+    //
+    // The "capacity" parameter is the maximum number of
+    // SocketAsyncEventArgs objects the pool can hold
+    public SocketAsyncEventArgsPool(int capacity)
+    {
+        m_pool = new Stack<SocketAsyncEventArgs>(capacity);
+    }
+
+    // Add a SocketAsyncEventArg instance to the pool
+    //
+    //The "item" parameter is the SocketAsyncEventArgs instance
+    // to add to the pool
+    public void Push(SocketAsyncEventArgs item)
+    {
+        if (item == null) { throw new ArgumentNullException("Items added to a SocketAsyncEventArgsPool cannot be null"); }
+        lock (m_pool)
+        {
+            m_pool.Push(item);
+        }
+    }
+
+    // Removes a SocketAsyncEventArgs instance from the pool
+    // and returns the object removed from the pool
+    public SocketAsyncEventArgs Pop()
+    {
+        lock (m_pool)
+        {
+            return m_pool.Pop();
+        }
+    }
+
+    // The number of SocketAsyncEventArgs instances in the pool
+    public int Count
+    {
+        get { return m_pool.Count; }
+    }
 }
