@@ -142,7 +142,12 @@ class T41Serial {
             end = first - 1;
             first = 0;
           } else {
+            // we have the start of a debug message, find its end
             end = Array.IndexOf(cmd, (byte)'>');
+            if(end == -1) {
+              // we have an incomplete message, set end to the end of the buffer
+              end = len - 1;
+            }
           }
 
           // execute command
