@@ -1,9 +1,6 @@
-using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.IO.Ports;
-using System.Data;
-using System.Runtime.CompilerServices;
 
 namespace T41ServerApp;
 
@@ -15,10 +12,6 @@ class T41Serial {
   private SerialPort? serialPort = null;
 
   // local T41 data
-  //private long freq = 7048000;
-  //private string split = "OFF";
-  //private string mode = "LSB";
-
   public long Freq { get; private set; } = 7048000;
   public string Split { get; private set; } = "OFF";
   public string Mode { get; private set; } = "LSB";
@@ -26,21 +19,18 @@ class T41Serial {
   private Socket[] dbSocket = new Socket[101];
   private int dbCount = 0;
 
-  // comms flags
-  private bool wsjtAwaitingResponse = false;
-  //private string awaitingReponse = "";
-  private bool awaitingT41Reply = false;
-  private bool t41Replied = false;
-
-  private string[] Ports { get; set; } = SerialPort.GetPortNames();
-
-  private T41Server wsjtServer;
+  private T41Server wsjtServer, debugServer;
 
   public T41Serial() {
   }
 
-  public void Init(T41Server server) {
-    wsjtServer = server;
+  public void Init(T41Server server1, T41Server server2) {
+    wsjtServer = server1;
+    debugServer = server2;
+  }
+
+  public void SetDebugSocket(Socket socket) {
+    dbSocket[dbCount++] = socket;
   }
 
   public bool Connect(string port = "") {
@@ -88,7 +78,7 @@ class T41Serial {
           selectedPort = requestedPort;
           result = true;
 
-          serialPort.DataReceived += new SerialDataReceivedEventHandler(DataReceivedHandler);
+          serialPort.DataReceived += new SerialDataReceivedEventHandler(T41DataReceivedHandler);
         } else {
           connectionStarted = false;
           selectedPort = "";
@@ -123,13 +113,12 @@ class T41Serial {
   // I couldn't get Invoke or events to work as it seems with winui 3 these remain on the current thread.
   // Using the main UI thread dispatcher for changes to bound properties does work.
   // (amazing how difficult it is to find information on this online)
-  public void DataReceivedHandler(object sender, SerialDataReceivedEventArgs e) {
+  public void T41DataReceivedHandler(object sender, SerialDataReceivedEventArgs e) {
     SerialPort sp = (SerialPort)sender;
     int len = sp.BytesToRead;
 
     if(len > 0) {
       byte[] byt = new byte[len];
-      int id;
 
       sp.Read(byt, 0, len);
 
@@ -160,19 +149,9 @@ class T41Serial {
           switch((char)cmd[0]) {
             case '<':
               if((char)cmd[end] == '>') {
+              int id;
                 if(FetchInt(cmd, 1, 2, out id)) {
-                  if(id < 100 && dbSocket[id] != null) {
-                    Array.Fill(msg, (byte)0);
-                    Array.Copy(cmd, msg, end + 1);
-                    dbSocket[id].SendAsync(msg, 0);
-                  } else {
-                    // handle debug messages without a window
-                    Console.WriteLine($"");
-                    Console.Write($"***** ");
-                    Console.Write(Encoding.Default.GetString(cmd, 4, end + 1 - 4));
-                    Console.WriteLine($" *****");
-                    Console.WriteLine($"");
-                  }
+                  debugServer.ProcessDebugMessage(Encoding.Default.GetString(cmd, 3, end + 1 - 4), id);
                 }
               }
               break;

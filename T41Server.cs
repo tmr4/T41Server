@@ -1,9 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.IO.Ports;
 
 namespace T41ServerApp;
+
+// Socket info: https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socket?view=net-8.0
 
 // modified from: https://learn.microsoft.com/en-us/dotnet/api/system.net.sockets.socketasynceventargs?view=net-8.0
 // Implements the connection logic for the socket server.
@@ -24,17 +25,19 @@ class T41Server {
   // serial class
   private T41Serial t41Serial;
 
+  // debug window
+  private Socket[] dbSocket = new Socket[101];
+  private int dbCount = 0;
+
   // Create an uninitialized server instance.
   // To start the server listening for connection requests
   // call the Init method followed by Start method
-  //
-  // <param name="numConnections">the maximum number of connections the sample is designed to handle simultaneously</param>
-  // <param name="receiveBufferSize">buffer size to use for each socket I/O operation</param>
   public T41Server(int numConnections, int receiveBufferSize) {
     m_totalBytesRead = 0;
     m_numConnectedSockets = 0;
     m_numConnections = numConnections;
     m_receiveBufferSize = receiveBufferSize;
+
     // allocate buffers such that the maximum number of sockets can have one outstanding read and
     //write posted to the socket simultaneously
     m_bufferManager = new BufferManager(receiveBufferSize * numConnections * opsToPreAlloc, receiveBufferSize);
@@ -47,7 +50,6 @@ class T41Server {
   // context objects.  These objects do not need to be preallocated
   // or reused, but it is done this way to illustrate how the API can
   // easily be used to create reusable objects to increase server performance.
-  //
   public void Init(T41Serial t41serial) {
     t41Serial = t41serial;
 
@@ -73,13 +75,11 @@ class T41Server {
 
   // Starts the server such that it is listening for
   // incoming connection requests.
-  //
-  // <param name="localEndPoint">The endpoint which the server will listening
-  // for connection requests on</param>
   public void Start(IPEndPoint localEndPoint) {
     // create the socket which listens for incoming connections
     listenSocket = new Socket(localEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
     listenSocket.Bind(localEndPoint);
+
     // start the server with a listen backlog of 100 connections
     listenSocket.Listen(100);
 
@@ -94,9 +94,6 @@ class T41Server {
   }
 
   // Begins an operation to accept a connection request from the client
-  //
-  // <param name="acceptEventArg">The context object to use when issuing
-  // the accept operation on the server's listening socket</param>
   public void StartAccept(SocketAsyncEventArgs acceptEventArg) {
     // loop while the method completes synchronously
     bool willRaiseEvent = false;
@@ -114,7 +111,6 @@ class T41Server {
 
   // This method is the callback method associated with Socket.AcceptAsync
   // operations and is invoked when an accept operation is complete
-  //
   void AcceptEventArg_Completed(object sender, SocketAsyncEventArgs e) {
     ProcessAccept(e);
 
@@ -127,20 +123,34 @@ class T41Server {
     Console.WriteLine("Debug window connection accepted. There are {0} clients connected to the server", m_numConnectedSockets);
 
     // Get the socket for the accepted client connection and put it into the
-    //ReadEventArg object user token
+    // ReadEventArg object user token
     SocketAsyncEventArgs readEventArgs = m_readWritePool.Pop();
     readEventArgs.UserToken = e.AcceptSocket;
+    if(((IPEndPoint)e.AcceptSocket.LocalEndPoint).Port == 48005) {
+      // create socket for debug window and send window ID back
+      Socket socket = (Socket)e.AcceptSocket;
+      dbSocket[dbCount++] = socket;
+      byte[] byt = new byte[1];
+      byt[0] = (byte)dbCount;
+      socket.SendAsync(byt);
 
-    // As soon as the client is connected, post a receive to the connection
-    bool willRaiseEvent = e.AcceptSocket.ReceiveAsync(readEventArgs);
-    if (!willRaiseEvent) {
-      ProcessReceive(readEventArgs);
+      // for now debug windows are receive only
+      //socket.SendAsync(readEventArgs.Buffer);
+      //bool willRaiseEvent = socket.SendAsync(readEventArgs);
+      //if (!willRaiseEvent) {
+      //  //ProcessSend(readEventArgs);
+      //}
+    } else {
+      // As soon as the client is connected, post a receive to the connection
+      bool willRaiseEvent = e.AcceptSocket.ReceiveAsync(readEventArgs);
+      if (!willRaiseEvent) {
+        ProcessReceive(readEventArgs);
+      }
     }
+
   }
 
   // This method is called whenever a receive or send operation is completed on a socket
-  //
-  // <param name="e">SocketAsyncEventArg associated with the completed receive operation</param>
   void IO_Completed(object sender, SocketAsyncEventArgs e) {
     // determine which type of operation just completed and call the associated handler
     switch (e.LastOperation) {
@@ -162,27 +172,17 @@ class T41Server {
   // If data was received then the data is processed according to the client type.
   //
   // Currently only WSJT-X should get here, so process it's command
-  //
   private void ProcessReceive(SocketAsyncEventArgs e) {
     // check if the remote host closed the connection
     if (e.BytesTransferred > 0 && e.SocketError == SocketError.Success) {
       //string response = "<CmdFreq:>" + (7074).ToString("F3");
       string command = Encoding.Default.GetString(e.Buffer, e.Offset, e.BytesTransferred);
-      Console.WriteLine($"Received command from WSJT-X: \"{command}\"");
 
       //increment the count of the total bytes receive by the server
       Interlocked.Add(ref m_totalBytesRead, e.BytesTransferred);
-      //Console.WriteLine("The server has read a total of {0} bytes", m_totalBytesRead);
 
       // process command
-      bool awaitingT41Reply = ProcessCommand(command);
-      //Console.WriteLine($"   Sending reply to WSJT-X: \"{response}\"");
-
-      //echo the data received back to the client
-      //e.SetBuffer(e.Offset, e.BytesTransferred);
-      //Socket socket = (Socket)e.UserToken;
-      //bool willRaiseEvent = socket.SendAsync(e);
-      //if (!willRaiseEvent) {
+      bool awaitingT41Reply = ProcessWsjtxCommand(command);
 
       // reset socket if we're not expecting a reply from the T41
       if (!awaitingT41Reply) {
@@ -198,8 +198,6 @@ class T41Server {
   // This method is invoked when an asynchronous send operation completes.
   // The method issues another receive on the socket to read any additional
   // data sent from the client
-  //
-  // <param name="e"></param>
   private void ProcessSend(SocketAsyncEventArgs e) {
     if (e.SocketError == SocketError.Success) {
       // done echoing data back to the client
@@ -235,9 +233,59 @@ class T41Server {
     Console.WriteLine("A debug window disconnected from the server. There are {0} clients connected to the server", m_numConnectedSockets);
   }
 
+  // process debug window message
+  public void ProcessDebugMessage(string msg, int id) {
+    if(id < 100 && dbSocket[id] != null) {
+      dbSocket[id].SendAsync(Encoding.Default.GetBytes(msg), 0);
+    } else {
+      // handle debug messages without a debug window
+      Console.WriteLine($"");
+      Console.Write($"***** ");
+      Console.Write(msg);
+      Console.WriteLine($" *****");
+      Console.WriteLine($"");
+    }
+  }
+
   // process command received from WSJT-X
   // *** TODO: extract this into a WSJT-X class ***
-  public bool ProcessCommand(string commandString) {
+  /*
+        WSJT-X DXLabSuiteCommanderTransceiver Commands:
+          Command structure:
+            <command:X>YYYY<parameters:Z><UUUU:V>WWWW<AAAA:B>CCCC
+            where:
+            X     length of command YYYY
+            YYYY  command
+            Z     length of parameters
+            <UUUU:V>WWWW    parameter 1, UUUU-parameter type, V-length of argument, WWWW-argument
+            <AAAA:B>CCCC    parameter 2, AAAA-parameter type, B-length of argument, CCCC-argument
+
+          Commands w/o parameters:
+            Command                                           Expected reponse (WSJT-X doesn't use length field, %1, it can be omitted)
+            <command:10>CmdGetFreq<parameters:0>              <CmdFreq:%1>yyyy.yyy freq in kHz
+            <command:5>CmdTX<parameters:0>                    none
+            <command:5>CmdRX<parameters:0>                    none
+            <command:9>CmdSendTx<parameters:0>                <CmdTX:%1>ON/OFF
+            <command:12>CmdGetTXFreq<parameters:0>            <CmdTXFreq:%1>yyyy.y freq in kHz
+            <command:12>CmdSendSplit<parameters:0>            <CmdSplit:%1>ON/OFF
+            <command:11>CmdSendMode<parameters:0>             <CmdMode:%1>AM/CW/CW-R/FM/LSB/USB/RTTY/RTTY-R/PKT/DATA-L/Data-L/DIGL/PKT-R/DATA-U/Data-U/DIGU
+
+          Commands w/ parameters (no response expected):
+            * %1 is parameter length
+            * %2 is argument length
+
+            Command             Typical
+            <command:10>CmdSetFreq<parameters:%1><xcvrfreq:%2>yyyy.yyy freq in kHz
+                                <command:10>CmdSetFreq<parameters:23><xcvrfreq:10> 7,048.055
+
+            <command:14>CmdSetFreqMode<parameters:%1><xcvrfreq:%2>yyyy.yyy<xcvrmode:%3>zz<preservesplitanddual:1>Y"
+                                <command:14>CmdSetFreqMode<parameters:63><xcvrfreq:10> 7,074.000<xcvrmode:3>USB<preservesplitanddual:1>Y
+
+            <command:11>CmdQSXSplit<parameters:%1><xcvrfreq:%2>yyyy.yyy<SuppressDual:1>Y[<SuppressModeChange:1>Y]
+            <command:8>CmdSplit<parameters:8><1:3>off
+            <command:10>CmdSetMode<parameters:%1><1:%2>yy mode as above
+*/
+public bool ProcessWsjtxCommand(string commandString) {
     bool awaitingT41Reply = false;
     string command = "";
 
@@ -248,7 +296,7 @@ class T41Server {
 
     if(commandString.IndexOf("<command:") == 0) {
       // we have the start of a command, parse it
-      Console.WriteLine($"Received command from WSJT-X: \"{command}\"");
+      Console.WriteLine($"Received command from WSJT-X: \"{commandString}\"");
 
       colon = commandString.IndexOf(":");
       index = commandString.IndexOf(">");
