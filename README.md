@@ -10,7 +10,7 @@ The app currently does the following:
     * Split VFO operation not yet supported.
   * Connects to multiple [T41 Debug Windows]() to display debug messages sent from the T41.
 
-![T41 Server and Debug Windows w/ WSJT-X](https://github.com/tmr4/T41Server/blob/main/images/T41Server_Debug.png)
+![T41 Server and Debug Windows w/ WSJT-X](https://github.com/tmr4/T41Server/blob/main/images/t41Server_Debug.png)
 
 This is a work in progress.  Still to come is adding communications to my T41 PC control and Beacon Monitor apps.
 
