@@ -14,23 +14,28 @@ internal class Program {
 
     Console.Title = "T41 Server";
 
-    // initialize and start servers
-    debugServer.Init(t41Serial);
-    debugServer.Start(debubIPEndPoint);
-
-    wsjtServer.Init(t41Serial);
-    wsjtServer.Start(wsjtIpEndPoint);
-
     if(t41Serial.Connect()) {
       Console.WriteLine($"Connected to " + t41Serial.SelectedPort);
 
+      t41Serial.Init(wsjtServer, debugServer);
+
+      // initialize and start servers
+      wsjtServer.Init(t41Serial);
+      wsjtServer.Start(wsjtIpEndPoint);
+
+      debugServer.Init(t41Serial);
+      debugServer.Start(debubIPEndPoint);
+
       // set T41 time
       t41Serial.SetTime();
-    }
 
-    t41Serial.Init(wsjtServer, debugServer);
-
-    while(true) {
+      Console.WriteLine("T41 Server started....");
+      Console.WriteLine("Press any key to terminate the server when done....");
+      Console.ReadKey();
+    } else {
+      Console.WriteLine("Failed to connect to T41");
+      Console.WriteLine("Press any key to terminate....");
+      Console.ReadKey();
     }
   }
 }

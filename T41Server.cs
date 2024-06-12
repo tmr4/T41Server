@@ -10,6 +10,8 @@ namespace T41ServerApp;
 // Implements the connection logic for the socket server.
 // After accepting a connection, all data is prossessed according to the client type.
 // This pattern is continued until the client disconnects.
+//
+// *** TODO: create parent server class with wsjt and debug child classes ***
 class T41Server {
   private int m_numConnections;   // the maximum number of connections the sample is designed to handle simultaneously
   private int m_receiveBufferSize;// buffer size to use for each socket I/O operation
@@ -73,8 +75,7 @@ class T41Server {
     }
   }
 
-  // Starts the server such that it is listening for
-  // incoming connection requests.
+  // Starts the server and begin listening for incoming connection requests.
   public void Start(IPEndPoint localEndPoint) {
     // create the socket which listens for incoming connections
     listenSocket = new Socket(localEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
@@ -87,10 +88,6 @@ class T41Server {
     SocketAsyncEventArgs acceptEventArg = new SocketAsyncEventArgs();
     acceptEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(AcceptEventArg_Completed);
     StartAccept(acceptEventArg);
-
-    //Console.WriteLine("{0} connected sockets with one outstanding receive posted to each....press any key", m_outstandingReadCount);
-    //Console.WriteLine("Press any key to terminate the server process....");
-    //Console.ReadKey();
   }
 
   // Begins an operation to accept a connection request from the client
@@ -119,6 +116,10 @@ class T41Server {
   }
 
   private void ProcessAccept(SocketAsyncEventArgs e) {
+
+    // *** TODO: consider rejecting connection if Serial hasn't started yet ***
+    // *** this can happen if client windows are started first ***---
+
     Interlocked.Increment(ref m_numConnectedSockets);
     Console.WriteLine("Debug window connection accepted. There are {0} clients connected to the server", m_numConnectedSockets);
 
