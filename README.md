@@ -8,7 +8,7 @@ The app currently does the following:
 
   * Connects WSJT-X to the T41 using the *DX Lab Suite Commander* interface.
     * Split VFO operation not yet supported.
-  * Connects to multiple [T41 Debug Windows]() to display debug messages sent from the T41.
+  * Connects to multiple [T41 Debug Windows](https://github.com/tmr4/T41Debug) to display debug messages sent from the T41.
 
 ![T41 Server and Debug Windows w/ WSJT-X](https://github.com/tmr4/T41Server/blob/main/images/t41Server_Debug.png)
 

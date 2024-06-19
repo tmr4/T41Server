@@ -2,35 +2,34 @@ using System.Net.Sockets;
 using System.Text;
 using System.IO.Ports;
 
-namespace T41ServerApp;
+using T41.Server.Debug;
+using T41.Server.WSJTX;
+
+namespace T41.Serial;
 
 class T41Serial {
   // serial port data
   private bool connectionStarted = false;
   private string selectedPort = "";
-  public string SelectedPort { get; }
+  public string SelectedPort { get {return selectedPort; } }
   private SerialPort? serialPort = null;
+
+  public bool Connected { get { return connectionStarted; } }
 
   // local T41 data
   public long Freq { get; private set; } = 7048000;
   public string Split { get; private set; } = "OFF";
   public string Mode { get; private set; } = "LSB";
 
-  private Socket[] dbSocket = new Socket[101];
-  private int dbCount = 0;
-
-  private T41Server wsjtServer, debugServer;
+  private ServerWSJTX wsjtServer;
+  private ServerDebug debugServer;
 
   public T41Serial() {
   }
 
-  public void Init(T41Server server1, T41Server server2) {
-    wsjtServer = server1;
-    debugServer = server2;
-  }
-
-  public void SetDebugSocket(Socket socket) {
-    dbSocket[dbCount++] = socket;
+  public void Init(ServerWSJTX wxjt, ServerDebug debug) {
+    wsjtServer = wxjt;
+    debugServer = debug;
   }
 
   public bool Connect(string port = "") {
